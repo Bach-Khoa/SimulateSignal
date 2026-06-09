@@ -1,0 +1,11 @@
+../obj/main.o
+../obj/mainwindow.o
+../obj/packetbuilder.o
+../obj/serialtransport.o
+../obj/datareader.o
+../obj/simulatorengine.o
+../obj/guidedialog.o
+../obj/moc_mainwindow.o
+../obj/moc_serialtransport.o
+../obj/moc_simulatorengine.o
+../obj/moc_guidedialog.o
