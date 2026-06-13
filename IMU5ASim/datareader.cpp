@@ -4,10 +4,6 @@
 #include <QStringList>
 #include <cmath>
 
-static bool parseBool(const QString& s) {
-    QString t = s.trimmed().toLower();
-    return (t == "true" || t == "1");
-}
 
 QVector<ImuFrame> DataReader::readCsv(const QString& path, QString& errorOut) {
     QVector<ImuFrame> frames;
@@ -30,41 +26,44 @@ QVector<ImuFrame> DataReader::readCsv(const QString& path, QString& errorOut) {
         if (line.trimmed().isEmpty()) continue;
 
         QStringList cols = line.split(',');
-        // Need at least 49 columns (indices 0–48)
-        if (cols.size() < 49) {
-            errorOut = QString("Line %1: expected >=49 columns, got %2")
+        // 12 columns: Index, Roll, Pitch, Yaw, Gx, Gy, Gz, Ax, Ay, Az, Temp, USW
+        if (cols.size() < 12) {
+            errorOut = QString("Line %1: expected 12 columns, got %2")
                            .arg(lineNum).arg(cols.size());
             return {};
         }
 
         ImuFrame f;
-        // col[2]  = 5a_adc26   → temp (°C)
-        // col[3]  = 5a_ml1     → roll (deg)
-        // col[4]  = 5a_ml2     → pitch (deg)
-        // col[5]  = 5a_ml3     → yaw (deg)
-        // col[11] = 5a_duc1    → ax (g)
-        // col[12] = 5a_duc2    → ay (g)
-        // col[13] = 5a_duc3    → az (g)
-        // col[15] = 5a_omega1  → gx (dps)
-        // col[16] = 5a_omega2  → gy (dps)
-        // col[17] = 5a_omega3  → gz (dps)
-        // col[38..48]          → USW bits 0–10
-        f.temp  = cols[2].trimmed().toFloat();
-        f.roll  = cols[3].trimmed().toFloat();
-        f.pitch = cols[4].trimmed().toFloat();
-        f.yaw   = cols[5].trimmed().toFloat();
-        f.ax    = cols[11].trimmed().toFloat();
-        f.ay    = cols[12].trimmed().toFloat();
-        f.az    = cols[13].trimmed().toFloat();
-        f.gx    = cols[15].trimmed().toFloat();
-        f.gy    = cols[16].trimmed().toFloat();
-        f.gz    = cols[17].trimmed().toFloat();
+        // col[0] = Index  (ignored)
+        // col[1] = Roll   (deg)
+        // col[2] = Pitch  (deg)
+        // col[3] = Yaw    (deg)
+        // col[4] = Gx     (dps)
+        // col[5] = Gy     (dps)
+        // col[6] = Gz     (dps)
+        // col[7] = Ax     (g)
+        // col[8] = Ay     (g)
+        // col[9] = Az     (g)
+        // col[10]= Temp   (°C)
+        // col[11]= USW    (decimal or 0x hex)
+        f.roll  = cols[1].trimmed().toFloat();
+        f.pitch = cols[2].trimmed().toFloat();
+        f.yaw   = cols[3].trimmed().toFloat();
+        f.gx    = cols[4].trimmed().toFloat();
+        f.gy    = cols[5].trimmed().toFloat();
+        f.gz    = cols[6].trimmed().toFloat();
+        f.ax    = cols[7].trimmed().toFloat();
+        f.ay    = cols[8].trimmed().toFloat();
+        f.az    = cols[9].trimmed().toFloat();
+        f.temp  = cols[10].trimmed().toFloat();
 
-        uint16_t usw = 0;
-        for (int bit = 0; bit <= 10; ++bit)
-            if (parseBool(cols[38 + bit]))
-                usw |= static_cast<uint16_t>(1u << bit);
-        f.usw = usw;
+        QString uswStr = cols[11].trimmed();
+        bool ok = false;
+        if (uswStr.startsWith("0x") || uswStr.startsWith("0X"))
+            f.usw = static_cast<uint16_t>(uswStr.toUInt(&ok, 16));
+        else
+            f.usw = static_cast<uint16_t>(uswStr.toUInt(&ok, 10));
+        if (!ok) f.usw = 0;
 
         frames.append(f);
     }
@@ -83,22 +82,23 @@ bool DataReader::writeTemplate(const QString& path, QString& errorOut) {
     }
 
     QTextStream out(&file);
+    // 12-column format: Index,Roll,Pitch,Yaw,Gx,Gy,Gz,Ax,Ay,Az,Temp,USW
     out << "Index,Roll(deg),Pitch(deg),Yaw(deg),Gx(dps),Gy(dps),Gz(dps),"
            "Ax(g),Ay(g),Az(g),Temp(C),USW\n";
 
-    // 125 rows = 1 second of data at 125 Hz, simple sine-wave demo
-    for (int i = 0; i < 125; ++i) {
-        double t = i * 0.008;  // 8ms step
-        double roll  = 10.0 * std::sin(2 * M_PI * 0.5 * t);
-        double pitch =  5.0 * std::cos(2 * M_PI * 0.5 * t);
-        double yaw   = i * 0.1;
-        double gx    = 5.0 * std::cos(2 * M_PI * 1.0 * t);
-        double gy    = 3.0 * std::sin(2 * M_PI * 1.0 * t);
-        double gz    = 1.0;
-        double ax    = 0.05 * std::sin(2 * M_PI * 2.0 * t);
-        double ay    = 0.03 * std::cos(2 * M_PI * 2.0 * t);
-        double az    = 1.0;
-        double temp  = 25.0 + 0.1 * std::sin(2 * M_PI * 0.1 * t);
+    // 250 rows = 2 seconds at 125 Hz, sine-wave demo motion
+    for (int i = 0; i < 250; ++i) {
+        double t     = i * 0.008;
+        double roll  = 15.0 * std::sin(2 * M_PI * 0.5 * t);
+        double pitch =  8.0 * std::cos(2 * M_PI * 0.5 * t);
+        double yaw   = i * 0.144;
+        double gx    =  8.0  * std::cos(2 * M_PI * 1.0 * t);
+        double gy    =  5.0  * std::sin(2 * M_PI * 1.0 * t);
+        double gz    = 18.0  + 0.5  * std::sin(2 * M_PI * 0.2 * t);
+        double ax    =  0.08 * std::sin(2 * M_PI * 2.0 * t);
+        double ay    =  0.05 * std::cos(2 * M_PI * 2.0 * t);
+        double az    =  1.0  + 0.01 * std::sin(2 * M_PI * 0.5 * t);
+        double temp  = 25.0 + 0.5  * std::sin(2 * M_PI * 0.1 * t);
 
         out << QString("%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,0\n")
                    .arg(i)

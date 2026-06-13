@@ -6,6 +6,7 @@
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QSplitter>
 #include <QLabel>
@@ -25,6 +26,8 @@
 #include <QSerialPortInfo>
 #include <QScrollBar>
 #include <QButtonGroup>
+#include <QStackedWidget>
+#include <QFrame>
 
 #include <QtCharts/QChartView>
 #include <QtCharts/QLineSeries>
@@ -37,9 +40,9 @@
 // ---------------------------------------------------------------------------
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
-    setWindowTitle("IMU 5A Simulator — 125 Hz RS422");
-    setMinimumSize(900, 700);
-    resize(1050, 760);
+    setWindowTitle("IMU 5A Simulator — KERNEL ICD 125 Hz RS422");
+    setMinimumSize(920, 720);
+    resize(1100, 780);
 
     m_transport = new SerialTransport(this);
     m_guide     = new GuideDialog(this);
@@ -47,7 +50,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     buildUi();
     onRefreshPorts();
 
-    statusBar()->showMessage("Ready — load a CSV file and select a COM port.");
+    statusBar()->showMessage("Ready — select CSV file or use Manual Input, then choose a COM port.");
 }
 
 MainWindow::~MainWindow() {
@@ -63,13 +66,11 @@ MainWindow::~MainWindow() {
 // ---------------------------------------------------------------------------
 
 void MainWindow::buildUi() {
-    // Menu
     auto* helpMenu = menuBar()->addMenu("&Help");
     auto* guideAct = helpMenu->addAction("&Guide (F1)");
     guideAct->setShortcut(Qt::Key_F1);
     connect(guideAct, &QAction::triggered, this, [this]{ showGuide(0); });
 
-    // Central widget
     auto* central = new QWidget(this);
     setCentralWidget(central);
 
@@ -77,23 +78,43 @@ void MainWindow::buildUi() {
     mainLayout->setSpacing(6);
     mainLayout->setContentsMargins(8, 8, 8, 8);
 
-    // Top row: Input | Transport | Control
     auto* topRow = new QHBoxLayout;
-    topRow->addWidget(buildInputGroup(),    3);
+    topRow->addWidget(buildInputGroup(),     3);
     topRow->addWidget(buildTransportGroup(), 2);
-    topRow->addWidget(buildControlGroup(),  2);
+    topRow->addWidget(buildControlGroup(),   2);
     mainLayout->addLayout(topRow);
 
-    // Bottom: charts + log
     mainLayout->addWidget(buildBottomTabs(), 1);
 }
 
 QWidget* MainWindow::buildInputGroup() {
     auto* box = new QGroupBox("Data Input");
-    auto* lay = new QFormLayout(box);
+    auto* lay = new QVBoxLayout(box);
     lay->setSpacing(6);
+    lay->setContentsMargins(8, 8, 8, 8);
 
-    // File row
+    // --- Source selector ---
+    auto* srcRow = new QHBoxLayout;
+    srcRow->addWidget(new QLabel("Source:"));
+    m_radioCsv    = new QRadioButton("CSV File");
+    m_radioManual = new QRadioButton("Manual Input");
+    m_radioCsv->setChecked(true);
+    auto* srcGrp = new QButtonGroup(this);
+    srcGrp->addButton(m_radioCsv);
+    srcGrp->addButton(m_radioManual);
+    srcRow->addWidget(m_radioCsv);
+    srcRow->addWidget(m_radioManual);
+    srcRow->addStretch();
+    lay->addLayout(srcRow);
+
+    // --- Stacked widget ---
+    m_inputStack = new QStackedWidget;
+
+    // ---- Page 0: CSV mode ----
+    auto* csvPage = new QWidget;
+    auto* csvLay  = new QFormLayout(csvPage);
+    csvLay->setSpacing(6);
+
     auto* fileRow = new QHBoxLayout;
     m_fileEdit = new QLineEdit;
     m_fileEdit->setPlaceholderText("Select CSV file...");
@@ -105,14 +126,93 @@ QWidget* MainWindow::buildInputGroup() {
     fileRow->addWidget(m_fileEdit, 1);
     fileRow->addWidget(browseBtn);
     fileRow->addWidget(templateBtn);
-    lay->addRow("File:", fileRow);
+    csvLay->addRow("File:", fileRow);
 
     m_framesLabel = new QLabel("Loaded: 0 frames");
-    lay->addRow("", m_framesLabel);
+    csvLay->addRow("", m_framesLabel);
 
-    // Mode
+    m_inputStack->addWidget(csvPage);
+
+    // ---- Page 1: Manual input mode ----
+    auto* manPage = new QWidget;
+    auto* manLay  = new QGridLayout(manPage);
+    manLay->setSpacing(4);
+    manLay->setContentsMargins(2, 2, 2, 2);
+
+    auto mkDbl = [](double lo, double hi, double val, int dec) {
+        auto* sb = new QDoubleSpinBox;
+        sb->setRange(lo, hi);
+        sb->setDecimals(dec);
+        sb->setValue(val);
+        sb->setMaximumWidth(100);
+        return sb;
+    };
+
+    m_spnHeading = mkDbl(0,    360,    0.0,  2);
+    m_spnPitch   = mkDbl(-90,  90,     0.0,  2);
+    m_spnRollM   = mkDbl(-180, 180,    0.0,  2);
+    m_spnGx      = mkDbl(-2000,2000,   0.0,  3);
+    m_spnGy      = mkDbl(-2000,2000,   0.0,  3);
+    m_spnGz      = mkDbl(-2000,2000,   0.0,  3);
+    m_spnAx      = mkDbl(-16,  16,     0.0,  4);
+    m_spnAy      = mkDbl(-16,  16,     0.0,  4);
+    m_spnAz      = mkDbl(-16,  16,     1.0,  4);
+    m_spnTemp    = mkDbl(-40,  85,    25.0,  1);
+    m_spnUsw     = new QSpinBox;
+    m_spnUsw->setRange(0, 65535);
+    m_spnUsw->setValue(0);
+    m_spnUsw->setMaximumWidth(100);
+
+    // Row 0: Orientation header
+    auto* oriHdr = new QLabel("<b>Orientation (deg)</b>");
+    manLay->addWidget(oriHdr, 0, 0, 1, 6);
+
+    // Row 1: Heading / Pitch / Roll
+    manLay->addWidget(new QLabel("Heading:"), 1, 0);
+    manLay->addWidget(m_spnHeading,           1, 1);
+    manLay->addWidget(new QLabel("Pitch:"),   1, 2);
+    manLay->addWidget(m_spnPitch,             1, 3);
+    manLay->addWidget(new QLabel("Roll:"),    1, 4);
+    manLay->addWidget(m_spnRollM,             1, 5);
+
+    // Row 2: Gyro header
+    auto* gyrHdr = new QLabel("<b>Gyro (dps)</b>");
+    manLay->addWidget(gyrHdr, 2, 0, 1, 6);
+
+    // Row 3: Gx / Gy / Gz
+    manLay->addWidget(new QLabel("Gx:"),  3, 0);
+    manLay->addWidget(m_spnGx,            3, 1);
+    manLay->addWidget(new QLabel("Gy:"),  3, 2);
+    manLay->addWidget(m_spnGy,            3, 3);
+    manLay->addWidget(new QLabel("Gz:"),  3, 4);
+    manLay->addWidget(m_spnGz,            3, 5);
+
+    // Row 4: Accel header
+    auto* accHdr = new QLabel("<b>Accel (g)</b>");
+    manLay->addWidget(accHdr, 4, 0, 1, 6);
+
+    // Row 5: Ax / Ay / Az
+    manLay->addWidget(new QLabel("Ax:"),  5, 0);
+    manLay->addWidget(m_spnAx,            5, 1);
+    manLay->addWidget(new QLabel("Ay:"),  5, 2);
+    manLay->addWidget(m_spnAy,            5, 3);
+    manLay->addWidget(new QLabel("Az:"),  5, 4);
+    manLay->addWidget(m_spnAz,            5, 5);
+
+    // Row 6: Temp / USW
+    manLay->addWidget(new QLabel("Temp (°C):"), 6, 0);
+    manLay->addWidget(m_spnTemp,                6, 1);
+    manLay->addWidget(new QLabel("USW:"),       6, 2);
+    manLay->addWidget(m_spnUsw,                 6, 3);
+
+    m_inputStack->addWidget(manPage);
+
+    lay->addWidget(m_inputStack);
+
+    // --- Loop / One-shot (chung cho cả CSV và Manual) ---
     auto* modeRow = new QHBoxLayout;
-    m_radioLoop = new QRadioButton("Loop");
+    modeRow->addWidget(new QLabel("Repeat:"));
+    m_radioLoop = new QRadioButton("Loop (continuous)");
     m_radioOnce = new QRadioButton("One-shot");
     m_radioLoop->setChecked(true);
     auto* modeGrp = new QButtonGroup(this);
@@ -121,7 +221,27 @@ QWidget* MainWindow::buildInputGroup() {
     modeRow->addWidget(m_radioLoop);
     modeRow->addWidget(m_radioOnce);
     modeRow->addStretch();
-    lay->addRow("Mode:", modeRow);
+    lay->addLayout(modeRow);
+
+    // Switch pages on source toggle
+    connect(m_radioCsv, &QRadioButton::toggled, this, [this](bool on) {
+        if (on) m_inputStack->setCurrentIndex(0);
+    });
+    connect(m_radioManual, &QRadioButton::toggled, this, [this](bool on) {
+        if (on) m_inputStack->setCurrentIndex(1);
+    });
+
+    // Connect spinboxes for live update while running
+    auto connectDbl = [this](QDoubleSpinBox* sb) {
+        connect(sb, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, &MainWindow::onManualValueChanged);
+    };
+    connectDbl(m_spnHeading); connectDbl(m_spnPitch); connectDbl(m_spnRollM);
+    connectDbl(m_spnGx);      connectDbl(m_spnGy);    connectDbl(m_spnGz);
+    connectDbl(m_spnAx);      connectDbl(m_spnAy);    connectDbl(m_spnAz);
+    connectDbl(m_spnTemp);
+    connect(m_spnUsw, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, &MainWindow::onManualValueChanged);
 
     return box;
 }
@@ -131,7 +251,6 @@ QWidget* MainWindow::buildTransportGroup() {
     auto* lay = new QFormLayout(box);
     lay->setSpacing(5);
 
-    // Port
     auto* portRow = new QHBoxLayout;
     m_portCombo = new QComboBox;
     m_portCombo->setMinimumWidth(90);
@@ -142,28 +261,27 @@ QWidget* MainWindow::buildTransportGroup() {
     portRow->addWidget(refreshBtn);
     lay->addRow("Port:", portRow);
 
-    // Baud
     m_baudCombo = new QComboBox;
     for (int b : {921600, 460800, 230400, 115200, 57600})
         m_baudCombo->addItem(QString::number(b), b);
     m_baudCombo->setCurrentIndex(0);
     lay->addRow("Baud rate:", m_baudCombo);
 
-    lay->addRow(new QLabel("<b>Scale Factors</b>"));
+    lay->addRow(new QLabel("<b>Scale Factors (KERNEL ICD)</b>"));
 
-    auto makeScale = [](double val, const QString& suffix) {
+    auto makeScale = [](double val, int dec, const QString& suffix) {
         auto* sb = new QDoubleSpinBox;
         sb->setRange(1e-6, 1.0);
-        sb->setDecimals(6);
-        sb->setSingleStep(0.001);
+        sb->setDecimals(dec);
+        sb->setSingleStep(val * 0.1);
         sb->setValue(val);
         sb->setSuffix(" " + suffix);
         return sb;
     };
-    m_angleLsb = makeScale(0.01,   "deg/LSB");
-    m_gyroLsb  = makeScale(0.001,  "dps/LSB");
-    m_accelLsb = makeScale(0.001,  "g/LSB");
-    m_tempLsb  = makeScale(0.01,   "°C/LSB");
+    m_angleLsb = makeScale(0.01,    2, "deg/LSB");
+    m_gyroLsb  = makeScale(0.00001, 6, "dps/LSB");
+    m_accelLsb = makeScale(0.00025, 6, "g/LSB");
+    m_tempLsb  = makeScale(0.1,     2, "°C/LSB");
     lay->addRow("Angle:",  m_angleLsb);
     lay->addRow("Gyro:",   m_gyroLsb);
     lay->addRow("Accel:",  m_accelLsb);
@@ -177,7 +295,6 @@ QWidget* MainWindow::buildControlGroup() {
     auto* lay = new QVBoxLayout(box);
     lay->setSpacing(6);
 
-    // Buttons
     auto* btnRow = new QHBoxLayout;
     m_startBtn = new QPushButton("▶  Start");
     m_stopBtn  = new QPushButton("■  Stop");
@@ -193,14 +310,12 @@ QWidget* MainWindow::buildControlGroup() {
     btnRow->addWidget(guideBtn);
     lay->addLayout(btnRow);
 
-    // Progress
     m_progress = new QProgressBar;
     m_progress->setRange(0, 100);
     m_progress->setValue(0);
     m_progress->setTextVisible(true);
     lay->addWidget(m_progress);
 
-    // Status labels
     auto* grid = new QFormLayout;
     grid->setSpacing(3);
     m_rowLabel  = new QLabel("Row: 0 / 0");
@@ -215,56 +330,183 @@ QWidget* MainWindow::buildControlGroup() {
     return box;
 }
 
-QTabWidget* MainWindow::buildBottomTabs() {
-    auto* tabs = new QTabWidget;
+// ---------------------------------------------------------------------------
+// CANoe-style signal list (left panel)
+// ---------------------------------------------------------------------------
+QWidget* MainWindow::buildSignalList() {
+    auto* panel = new QFrame;
+    panel->setFrameShape(QFrame::StyledPanel);
+    panel->setFixedWidth(175);
+    panel->setStyleSheet("background:#f5f5f5;");
 
-    // Orientation chart
-    QChartView* oriView = makeChartView(m_oriChart,
-        m_sRoll, m_sPitch, m_sYaw,
-        {"Roll", "Pitch", "Yaw"},
-        {Qt::red, QColor(0,180,0), Qt::blue});
-    m_oriChart->setTitle("Orientation Angles (deg)");
-    tabs->addTab(oriView, "Orientation");
+    auto* layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(4, 4, 4, 4);
+    layout->setSpacing(2);
 
-    // Gyro chart
-    QChartView* gyroView = makeChartView(m_gyroChart,
-        m_sGx, m_sGy, m_sGz,
-        {"Gx", "Gy", "Gz"},
-        {Qt::red, QColor(0,180,0), Qt::blue});
-    m_gyroChart->setTitle("Gyro HR (dps)");
-    tabs->addTab(gyroView, "Gyro");
+    auto* hdr = new QLabel("  Signals");
+    hdr->setStyleSheet("background:#1f4e79; color:white; font-weight:bold;"
+                       "padding:4px; font-size:11px;");
+    layout->addWidget(hdr);
 
-    // Accel chart
-    QChartView* accelView = makeChartView(m_accelChart,
-        m_sAx, m_sAy, m_sAz,
-        {"Ax", "Ay", "Az"},
-        {Qt::red, QColor(0,180,0), Qt::blue});
-    m_accelChart->setTitle("Accelerometer (g)");
-    tabs->addTab(accelView, "Accel");
+    struct Entry { QColor color; QString name; };
+    const QList<Entry> entries = {
+        { QColor(220,50,50),   "Heading (deg)" },
+        { QColor(50,180,50),   "Pitch (deg)"   },
+        { QColor(50,100,220),  "Roll (deg)"    },
+        { QColor(160,160,160), "──────────"    },
+        { QColor(220,50,50),   "Gx (dps)"      },
+        { QColor(50,180,50),   "Gy (dps)"      },
+        { QColor(50,100,220),  "Gz (dps)"      },
+        { QColor(160,160,160), "──────────"    },
+        { QColor(220,50,50),   "Ax (g)"        },
+        { QColor(50,180,50),   "Ay (g)"        },
+        { QColor(50,100,220),  "Az (g)"        },
+        { QColor(160,160,160), "──────────"    },
+        { QColor(230,130,0),   "Temp (°C)"     },
+    };
 
-    // Temp chart (single series — reuse s0 slot)
-    QLineSeries *dummy1 = nullptr, *dummy2 = nullptr;
-    QChartView* tempView = makeChartView(m_tempChart,
-        m_sTemp, dummy1, dummy2,
-        {"Temp"},
-        {QColor(255, 120, 0)});
-    m_tempChart->setTitle("Temperature (°C)");
-    tabs->addTab(tempView, "Temp");
+    for (const auto& e : entries) {
+        if (e.name.startsWith("──")) {
+            auto* sep = new QFrame;
+            sep->setFrameShape(QFrame::HLine);
+            sep->setStyleSheet("color:#cccccc;");
+            layout->addWidget(sep);
+            continue;
+        }
+        auto* row = new QWidget;
+        auto* rl  = new QHBoxLayout(row);
+        rl->setContentsMargins(2, 1, 2, 1);
+        rl->setSpacing(5);
+        auto* swatch = new QLabel;
+        swatch->setFixedSize(14, 14);
+        swatch->setStyleSheet(QString("background:%1; border:1px solid #888;")
+                                  .arg(e.color.name()));
+        auto* lbl = new QLabel(e.name);
+        lbl->setFont(QFont("", 9));
+        rl->addWidget(swatch);
+        rl->addWidget(lbl, 1);
+        layout->addWidget(row);
+    }
 
-    // Packet log
+    layout->addStretch();
+    return panel;
+}
+
+// ---------------------------------------------------------------------------
+// Main chart area — CANoe style stacked lanes
+// ---------------------------------------------------------------------------
+QWidget* MainWindow::buildBottomTabs() {
+    auto* outerSplit = new QSplitter(Qt::Horizontal);
+    outerSplit->setHandleWidth(2);
+
+    outerSplit->addWidget(buildSignalList());
+
+    auto* laneSplit = new QSplitter(Qt::Vertical);
+    laneSplit->setHandleWidth(1);
+    laneSplit->setStyleSheet("QSplitter::handle { background:#cccccc; }");
+
+    struct LaneDef {
+        QChart*&      chart;
+        QLineSeries*& s0;
+        QLineSeries*& s1;
+        QLineSeries*& s2;
+        QStringList   names;
+        QList<QColor> colors;
+        QString       yLabel;
+        bool          isLast;
+    };
+
+    QLineSeries *_d1 = nullptr, *_d2 = nullptr;
+    QList<LaneDef> lanes = {
+        { m_oriChart,   m_sRoll,  m_sPitch, m_sYaw,
+          {"Heading","Pitch","Roll"},
+          {QColor(220,50,50), QColor(50,180,50), QColor(50,100,220)},
+          "deg", false },
+        { m_gyroChart, m_sGx, m_sGy, m_sGz,
+          {"Gx","Gy","Gz"},
+          {QColor(220,50,50), QColor(50,180,50), QColor(50,100,220)},
+          "dps", false },
+        { m_accelChart, m_sAx, m_sAy, m_sAz,
+          {"Ax","Ay","Az"},
+          {QColor(220,50,50), QColor(50,180,50), QColor(50,100,220)},
+          "g", false },
+        { m_tempChart, m_sTemp, _d1, _d2,
+          {"Temp"},
+          {QColor(230,130,0)},
+          "°C", true },
+    };
+
+    for (auto& ld : lanes) {
+        QChartView* view = makeChartView(ld.chart, ld.s0, ld.s1, ld.s2,
+                                         ld.names, ld.colors);
+        styleSignalLane(ld.chart, ld.yLabel, ld.isLast);
+        view->setMinimumHeight(80);
+        view->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        view->setRenderHint(QPainter::Antialiasing);
+        laneSplit->addWidget(view);
+    }
+    laneSplit->setSizes({160, 160, 160, 130});
+    outerSplit->addWidget(laneSplit);
+
+    auto* logPanel  = new QWidget;
+    auto* logLayout = new QVBoxLayout(logPanel);
+    logLayout->setContentsMargins(2, 0, 0, 0);
+    logLayout->setSpacing(2);
+    auto* logHdr = new QLabel("  Packet Log (KERNEL ICD LE)");
+    logHdr->setStyleSheet(
+        "background:#2e75b6; color:white; font-weight:bold; padding:3px; font-size:10px;");
+    logLayout->addWidget(logHdr);
     m_hexLog = new QTextEdit;
     m_hexLog->setReadOnly(true);
-    m_hexLog->setFont(QFont("Courier New", 9));
-    m_hexLog->setPlaceholderText("Packet hex dump will appear here...");
-    auto* logContainer = new QWidget;
-    auto* logLayout    = new QVBoxLayout(logContainer);
-    auto* clearBtn     = new QPushButton("Clear log");
+    m_hexLog->setFont(QFont("Courier New", 8));
+    m_hexLog->setPlaceholderText("Hex dump...");
+    logLayout->addWidget(m_hexLog, 1);
+    auto* clearBtn = new QPushButton("Clear");
+    clearBtn->setFixedHeight(20);
     connect(clearBtn, &QPushButton::clicked, m_hexLog, &QTextEdit::clear);
-    logLayout->addWidget(m_hexLog);
     logLayout->addWidget(clearBtn);
-    tabs->addTab(logContainer, "Packet Log");
+    outerSplit->addWidget(logPanel);
 
-    return tabs;
+    outerSplit->setSizes({175, 680, 240});
+    return outerSplit;
+}
+
+// ---------------------------------------------------------------------------
+// Style lane
+// ---------------------------------------------------------------------------
+void MainWindow::styleSignalLane(QChart* c, const QString& yLabel, bool showXAxis) {
+    c->setTitle(QString());
+    c->setMargins(QMargins(0, 2, 4, 2));
+    c->setBackgroundRoundness(0);
+    c->setBackgroundBrush(Qt::white);
+    c->legend()->setVisible(false);
+
+    if (!c->axes(Qt::Horizontal).isEmpty()) {
+        auto* axX = qobject_cast<QValueAxis*>(c->axes(Qt::Horizontal).first());
+        if (axX) {
+            axX->setLabelsVisible(showXAxis);
+            axX->setTitleVisible(showXAxis);
+            if (showXAxis) axX->setTitleText("Sample");
+            axX->setGridLineVisible(true);
+            axX->setGridLineColor(QColor(230, 230, 230));
+            axX->setMinorGridLineVisible(false);
+            axX->setTickCount(11);
+        }
+    }
+
+    if (!c->axes(Qt::Vertical).isEmpty()) {
+        auto* axY = qobject_cast<QValueAxis*>(c->axes(Qt::Vertical).first());
+        if (axY) {
+            axY->setTitleText(yLabel);
+            axY->setTitleFont(QFont("", 8, QFont::Bold));
+            axY->setTitleVisible(true);
+            axY->setLabelsFont(QFont("", 8));
+            axY->setLabelFormat("%.2f");
+            axY->setTickCount(3);
+            axY->setGridLineColor(QColor(230, 230, 230));
+            axY->setMinorGridLineVisible(false);
+        }
+    }
 }
 
 QChartView* MainWindow::makeChartView(QChart*& chartOut,
@@ -316,9 +558,9 @@ void MainWindow::appendChartPoint(QLineSeries* s, double y) {
 }
 
 void MainWindow::updateAllCharts(const ImuFrame& f) {
-    appendChartPoint(m_sRoll,  f.roll);
+    appendChartPoint(m_sRoll,  f.yaw);    // Heading → first Ori series
     appendChartPoint(m_sPitch, f.pitch);
-    appendChartPoint(m_sYaw,   f.yaw);
+    appendChartPoint(m_sYaw,   f.roll);   // Roll → third Ori series
 
     appendChartPoint(m_sGx, f.gx);
     appendChartPoint(m_sGy, f.gy);
@@ -330,12 +572,51 @@ void MainWindow::updateAllCharts(const ImuFrame& f) {
 
     appendChartPoint(m_sTemp, f.temp);
 
-    // Auto-scale each chart Y axis
-    for (QChart* c : {m_oriChart, m_gyroChart, m_accelChart, m_tempChart}) {
-        if (c) c->axes(Qt::Vertical).first()->setRange(
-            qobject_cast<QValueAxis*>(c->axes(Qt::Vertical).first())->min(),
-            qobject_cast<QValueAxis*>(c->axes(Qt::Vertical).first())->max());
-    }
+    auto rescaleChart = [](QChart* c) {
+        if (!c || c->axes(Qt::Vertical).isEmpty()) return;
+        auto* axisY = qobject_cast<QValueAxis*>(c->axes(Qt::Vertical).first());
+        if (!axisY) return;
+        double lo =  1e18, hi = -1e18;
+        for (auto* series : c->series()) {
+            auto* ls = qobject_cast<QLineSeries*>(series);
+            if (!ls) continue;
+            for (const QPointF& pt : ls->points()) {
+                if (pt.y() < lo) lo = pt.y();
+                if (pt.y() > hi) hi = pt.y();
+            }
+        }
+        if (hi <= lo) { lo -= 1.0; hi += 1.0; }
+        double margin = (hi - lo) * 0.1;
+        axisY->setRange(lo - margin, hi + margin);
+    };
+
+    for (QChart* c : {m_oriChart, m_gyroChart, m_accelChart, m_tempChart})
+        rescaleChart(c);
+}
+
+// ---------------------------------------------------------------------------
+// Manual frame helpers
+// ---------------------------------------------------------------------------
+
+ImuFrame MainWindow::getManualFrame() const {
+    ImuFrame f;
+    f.yaw   = static_cast<float>(m_spnHeading->value());
+    f.pitch = static_cast<float>(m_spnPitch->value());
+    f.roll  = static_cast<float>(m_spnRollM->value());
+    f.gx    = static_cast<float>(m_spnGx->value());
+    f.gy    = static_cast<float>(m_spnGy->value());
+    f.gz    = static_cast<float>(m_spnGz->value());
+    f.ax    = static_cast<float>(m_spnAx->value());
+    f.ay    = static_cast<float>(m_spnAy->value());
+    f.az    = static_cast<float>(m_spnAz->value());
+    f.temp  = static_cast<float>(m_spnTemp->value());
+    f.usw   = static_cast<uint16_t>(m_spnUsw->value());
+    return f;
+}
+
+void MainWindow::onManualValueChanged() {
+    if (m_engine && m_engine->isRunning() && m_radioManual->isChecked())
+        m_engine->setLiveFrame(getManualFrame());
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +657,7 @@ void MainWindow::onTemplate() {
     }
     statusBar()->showMessage("Template saved: " + path);
     QMessageBox::information(this, "Template Created",
-        QString("Template CSV saved to:\n%1\n\nEdit it in Excel, then load with Browse.").arg(path));
+        QString("Template CSV saved to:\n%1\n\nEdit it, then load with Browse.").arg(path));
 }
 
 void MainWindow::onRefreshPorts() {
@@ -388,7 +669,9 @@ void MainWindow::onRefreshPorts() {
 }
 
 void MainWindow::onStart() {
-    if (m_frames.isEmpty()) {
+    bool isManual = m_radioManual->isChecked();
+
+    if (!isManual && m_frames.isEmpty()) {
         QMessageBox::warning(this, "No Data", "Please load a CSV file first.");
         return;
     }
@@ -397,13 +680,11 @@ void MainWindow::onStart() {
         return;
     }
 
-    // Gather scale config from UI
     m_scale.angle_lsb = m_angleLsb->value();
     m_scale.gyro_lsb  = m_gyroLsb->value();
     m_scale.accel_lsb = m_accelLsb->value();
     m_scale.temp_lsb  = m_tempLsb->value();
 
-    // Open serial port
     int baud = m_baudCombo->currentData().toInt();
     if (!m_transport->open(m_portCombo->currentText(), baud)) {
         QMessageBox::critical(this, "Port Error",
@@ -412,28 +693,33 @@ void MainWindow::onStart() {
         return;
     }
 
-    // Create and connect engine
     if (m_engine) { m_engine->requestStop(); m_engine->wait(2000); delete m_engine; }
     m_engine = new SimulatorEngine(this);
 
-    connect(m_engine, &SimulatorEngine::statsUpdated, this, &MainWindow::onStatsUpdated);
-    connect(m_engine, &SimulatorEngine::packetReady,  this, &MainWindow::onPacketReady);
+    connect(m_engine, &SimulatorEngine::statsUpdated,  this, &MainWindow::onStatsUpdated);
+    connect(m_engine, &SimulatorEngine::packetReady,   this, &MainWindow::onPacketReady);
     connect(m_engine, &SimulatorEngine::errorOccurred, this, &MainWindow::onSimError);
     connect(m_engine, &SimulatorEngine::finished,      this, &MainWindow::onSimFinished);
 
-    m_engine->setup(m_frames, m_scale, m_transport, m_radioLoop->isChecked());
+    if (isManual) {
+        m_engine->setupManual(m_scale, m_transport, getManualFrame(), m_radioLoop->isChecked());
+    } else {
+        m_engine->setup(m_frames, m_scale, m_transport, m_radioLoop->isChecked());
+    }
 
     m_lastSentTotal = 0;
     m_runTimer.start();
     m_progress->setValue(0);
-    m_rowLabel->setText(QString("Row: 0 / %1").arg(m_frames.size()));
+    m_rowLabel->setText(isManual ? "Row: — (Manual)" :
+                        QString("Row: 0 / %1").arg(m_frames.size()));
     m_sentLabel->setText("Sent: 0 packets");
     m_freqLabel->setText("Freq: — Hz");
 
     m_startBtn->setEnabled(false);
     m_stopBtn->setEnabled(true);
-    statusBar()->showMessage(QString("Sending on %1 @ %2 baud — 125 Hz")
-                                 .arg(m_portCombo->currentText()).arg(baud));
+    statusBar()->showMessage(QString("Sending on %1 @ %2 baud — 125 Hz (%3)")
+                                 .arg(m_portCombo->currentText()).arg(baud)
+                                 .arg(isManual ? "Manual" : "CSV"));
 
     m_engine->start(QThread::TimeCriticalPriority);
 }
@@ -443,14 +729,13 @@ void MainWindow::onStop() {
 }
 
 void MainWindow::onStatsUpdated(int index, int total, qint64 sentTotal) {
-    // Progress
     if (total > 0) {
         m_progress->setValue(static_cast<int>(100.0 * index / total));
         m_rowLabel->setText(QString("Row: %1 / %2").arg(index).arg(total));
     }
-    m_sentLabel->setText(QString("Sent: %1 packets").arg(sentTotal));
+    qint64 bytes = m_transport->bytesSent();
+    m_sentLabel->setText(QString("Sent: %1 pkts  (%2 bytes)").arg(sentTotal).arg(bytes));
 
-    // Frequency estimate
     double elapsed = m_runTimer.elapsed() / 1000.0;
     if (elapsed > 0.5) {
         double hz = sentTotal / elapsed;
@@ -459,25 +744,22 @@ void MainWindow::onStatsUpdated(int index, int total, qint64 sentTotal) {
 }
 
 void MainWindow::onPacketReady(QByteArray packet, ImuFrame frame) {
-    // Update charts
     updateAllCharts(frame);
 
-    // Hex log
     QString hex;
     for (int i = 0; i < packet.size(); ++i) {
-        if (i > 0 && i % 12 == 0) hex += "\n";
+        if (i > 0 && i % 14 == 0) hex += "\n";
         hex += QString("%1 ").arg(static_cast<uint8_t>(packet[i]), 2, 16, QChar('0')).toUpper();
     }
-    hex += QString("\n— Roll=%.2f° Pitch=%.2f° Yaw=%.2f°  "
+    hex += QString("\n— Hdg=%.2f° Pitch=%.2f° Roll=%.2f°  "
                    "Gx=%.3f Gy=%.3f Gz=%.3f dps  "
-                   "Ax=%.3f Ay=%.3f Az=%.3f g  T=%.1f°C\n")
-               .arg(frame.roll).arg(frame.pitch).arg(frame.yaw)
+                   "Ax=%.4f Ay=%.4f Az=%.4f g  T=%.1f°C  USW=%u\n")
+               .arg(frame.yaw).arg(frame.pitch).arg(frame.roll)
                .arg(frame.gx).arg(frame.gy).arg(frame.gz)
                .arg(frame.ax).arg(frame.ay).arg(frame.az)
-               .arg(frame.temp);
+               .arg(frame.temp).arg(frame.usw);
 
     m_hexLog->append(hex);
-    // Keep log from growing too large
     if (m_hexLog->document()->blockCount() > 500)
         m_hexLog->clear();
 }

@@ -1,5 +1,6 @@
 #include "simulatorengine.h"
 #include <QThread>
+#include <QMutexLocker>
 
 #ifdef Q_OS_WIN
 #  include <windows.h>
@@ -7,7 +8,7 @@
 #  include <time.h>
 #endif
 
-static constexpr int FREQ_HZ    = 125;
+static constexpr int FREQ_HZ     = 125;
 static constexpr int STATS_EVERY = 12;   // emit statsUpdated every N frames (~96ms)
 static constexpr int LOG_EVERY   = 64;   // emit packetReady every N frames (~5Hz)
 
@@ -18,11 +19,30 @@ void SimulatorEngine::setup(const QVector<ImuFrame>& frames,
                             SerialTransport* transport,
                             bool loop)
 {
-    m_frames    = frames;
-    m_scale     = scale;
-    m_transport = transport;
-    m_loop      = loop;
+    m_frames     = frames;
+    m_scale      = scale;
+    m_transport  = transport;
+    m_loop       = loop;
+    m_manualMode = false;
     m_stop.storeRelease(0);
+}
+
+void SimulatorEngine::setupManual(const ScaleConfig& scale,
+                                  SerialTransport* transport,
+                                  const ImuFrame& frame,
+                                  bool loop)
+{
+    m_scale      = scale;
+    m_transport  = transport;
+    m_loop       = loop;
+    m_manualMode = true;
+    m_liveFrame  = frame;
+    m_stop.storeRelease(0);
+}
+
+void SimulatorEngine::setLiveFrame(const ImuFrame& f) {
+    QMutexLocker lk(&m_liveMutex);
+    m_liveFrame = f;
 }
 
 void SimulatorEngine::requestStop() { m_stop.storeRelease(1); }
@@ -30,7 +50,7 @@ void SimulatorEngine::requestStop() { m_stop.storeRelease(1); }
 void SimulatorEngine::run() {
     QThread::currentThread()->setPriority(QThread::TimeCriticalPriority);
 
-    if (m_frames.isEmpty()) {
+    if (!m_manualMode && m_frames.isEmpty()) {
         emit errorOccurred("No frames loaded.");
         emit finished();
         return;
@@ -51,11 +71,16 @@ void SimulatorEngine::run() {
 
     int      idx       = 0;
     qint64   sentTotal = 0;
-    int      total     = m_frames.size();
+    int      total     = m_manualMode ? 0 : m_frames.size();
 
     while (!m_stop.loadAcquire()) {
-        int frameIdx = idx % total;
-        const ImuFrame& frame = m_frames[frameIdx];
+        ImuFrame frame;
+        if (m_manualMode) {
+            QMutexLocker lk(&m_liveMutex);
+            frame = m_liveFrame;
+        } else {
+            frame = m_frames[idx % total];
+        }
 
         QByteArray pkt = PacketBuilder5A::build(frame, m_scale);
 
@@ -65,16 +90,18 @@ void SimulatorEngine::run() {
         }
 
         sentTotal++;
-        idx++;
+        if (!m_manualMode) idx++;
 
-        if (!m_loop && idx >= total) break;
+        const bool isLastPacket = ( m_manualMode && !m_loop) ||
+                                  (!m_manualMode && !m_loop && idx >= total);
 
-        // Throttled UI updates
-        if (sentTotal % STATS_EVERY == 0)
-            emit statsUpdated(frameIdx + 1, total, sentTotal);
+        if (sentTotal % STATS_EVERY == 0 || isLastPacket)
+            emit statsUpdated(m_manualMode ? 0 : (total > 0 ? idx % total : 0), total, sentTotal);
 
-        if (sentTotal % LOG_EVERY == 0)
+        if (sentTotal % LOG_EVERY == 0 || isLastPacket)
             emit packetReady(pkt, frame);
+
+        if (isLastPacket) break;
 
         // High-precision busy-wait until next frame boundary
 #ifdef Q_OS_WIN
@@ -87,7 +114,6 @@ void SimulatorEngine::run() {
 #endif
     }
 
-    // Final stats update
-    emit statsUpdated(idx % total, total, sentTotal);
+    emit statsUpdated(m_manualMode ? 0 : (idx % (total > 0 ? total : 1)), total, sentTotal);
     emit finished();
 }
